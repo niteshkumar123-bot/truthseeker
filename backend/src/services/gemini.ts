@@ -85,8 +85,20 @@ export async function analyzeEvidence(query: string, sources: ResearchSource[]):
       if (!response.ok) {
         lastStatus = response.status;
         lastMessage = providerMessage(responseBody, response.status);
-        const modelMissing = response.status === 404 && /model|not found|not supported/i.test(lastMessage);
-        if (modelMissing) continue;
+        const modelMissing =
+  response.status === 404 &&
+  /model|not found|not supported/i.test(lastMessage);
+
+const temporarilyUnavailable = response.status === 503;
+
+if (modelMissing || temporarilyUnavailable) {
+  if (config.nodeEnv !== "test") {
+    console.warn(
+      `[TruthSeeker] Gemini model ${model} returned HTTP ${response.status}; trying fallback if available.`,
+    );
+  }
+  continue;
+}
 
         if (config.nodeEnv !== "test") {
           console.error("[TruthSeeker] Gemini request failed:", {
