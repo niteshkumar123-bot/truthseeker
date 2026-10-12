@@ -9,12 +9,14 @@ import { researchRequestSchema } from "./schemas.js";
 import { research } from "./services/research.js";
 
 export const app = express();
+// Render sits behind a trusted reverse proxy; this lets express-rate-limit
+// identify client IPs from the forwarded address correctly.
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
 app.use(helmet());
 app.use(cors({
   origin: config.frontendOrigin.split(",").map((origin) => origin.trim()),
-  methods: ["GET", "POST"],
+  methods: ["GET", "POST", "OPTIONS"],
 }));
 app.use(express.json({ limit: "20kb" }));
 app.use("/api", rateLimit({ windowMs: 60_000, limit: 20, standardHeaders: "draft-7", legacyHeaders: false }));

@@ -49,10 +49,10 @@ Copy-Item backend/.env.example backend/.env
 |---|---|---|---|
 | `GEMINI_API_KEY` | For live research | — | Server-side Gemini API key |
 | `TAVILY_API_KEY` | For live research | — | Server-side Tavily API key |
-| `GEMINI_MODEL` | No | `gemini-2.5-flash` | Gemini model identifier |
+| `GEMINI_MODEL` | No | `gemini-2.5-flash-lite` | Gemini model identifier |
 | `PORT` | No | `4000` | Express port |
 | `FRONTEND_ORIGIN` | No | `http://localhost:5173` | Allowed browser origin |
-| `REQUEST_TIMEOUT_MS` | No | `20000` | Timeout for each upstream request |
+| `REQUEST_TIMEOUT_MS` | No | `60000` | Timeout for each upstream request |
 | `NODE_ENV` | No | `development` | Runtime environment |
 
 Never put provider keys in frontend variables such as `VITE_*`. Never commit `.env`.
@@ -130,6 +130,6 @@ The backend must permit the deployed frontend origin through `FRONTEND_ORIGIN`. 
 
 - If the UI says **Gemini rejected the API key**, create/verify a key in Google AI Studio, update `GEMINI_API_KEY` in `backend/.env`, and restart `npm run dev`. Never paste API keys into PowerShell as `NAME=value`; that syntax is not valid PowerShell. Put the variables in the `.env` file instead.
 - If the UI says **Gemini quota or rate limit reached**, check the project's Google AI Studio quota/usage.
-- If the UI says the model is unavailable, check `GEMINI_MODEL` in `backend/.env`. The default is `gemini-2.5-flash`.
+- If the UI says the model is unavailable, check `GEMINI_MODEL` in `backend/.env`. The default is `gemini-2.5-flash-lite`. The backend tries fallback models after a model-not-found response, temporary HTTP 503, or request timeout.
 - Backend logs include sanitized provider diagnostics to help identify upstream failures. Do not share or commit `.env` files. If an API key has been pasted into a chat or public repository, revoke it and create a replacement.
 - Run `npm run build` from the project root to verify both workspaces.

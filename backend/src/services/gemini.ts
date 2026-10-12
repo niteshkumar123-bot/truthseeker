@@ -42,103 +42,108 @@ export async function analyzeEvidence(query: string, sources: ResearchSource[]):
   ).join("\n\n");
   const prompt = `${instructions}\n\nUSER CLAIM:\n${query}\n\nRETRIEVED SOURCES:\n${sourceContext || "(No sources were retrieved.)"}`;
 
-  // Some API keys expose different model aliases. Try the configured model first,
-  // then only use fallback models if Google explicitly reports that model as missing.
+  // Try the configured model first. If Google reports a missing model, temporary
+  // overload, or request timeout, move to the next candidate. Each attempt gets
+  // its own timeout so one slow model does not consume the entire fallback budget.
   const models = [...new Set([
     config.geminiModel,
+    "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
     "gemini-flash-latest",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-pro",
   ].filter(Boolean))];
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
   let lastStatus = 0;
   let lastMessage = "";
   let successfulText: string | undefined;
+  let timedOut = false;
 
-  try {
-    for (const model of models) {
-      let response: Response;
-      try {
-        response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(config.geminiApiKey)}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            signal: controller.signal,
-            body: JSON.stringify({
-              contents: [{ role: "user", parts: [{ text: prompt }] }],
-              generationConfig: { responseMimeType: "application/json", temperature: 0.1 },
-            }),
-          },
-        );
-      } catch (error) {
-        if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
-          throw new AppError(504, "UPSTREAM_TIMEOUT", "Gemini took too long to respond. Please try again.");
-        }
-        throw error;
-      }
-
-      const responseBody = await response.text();
-      if (!response.ok) {
-        lastStatus = response.status;
-        lastMessage = providerMessage(responseBody, response.status);
-        const modelMissing =
-  response.status === 404 &&
-  /model|not found|not supported/i.test(lastMessage);
-
-const temporarilyUnavailable = response.status === 503;
-
-if (modelMissing || temporarilyUnavailable) {
-  if (config.nodeEnv !== "test") {
-    console.warn(
-      `[TruthSeeker] Gemini model ${model} returned HTTP ${response.status}; trying fallback if available.`,
-    );
-  }
-  continue;
-}
-
+  for (const model of models) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(config.geminiApiKey)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: { responseMimeType: "application/json", temperature: 0.1 },
+          }),
+        },
+      );
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+        timedOut = true;
+        lastStatus = 504;
+        lastMessage = "Gemini request timed out";
         if (config.nodeEnv !== "test") {
-          console.error("[TruthSeeker] Gemini request failed:", {
-            model,
-            status: response.status,
-            message: sanitize(lastMessage),
-          });
+          console.warn(`[TruthSeeker] Gemini model ${model} timed out; trying fallback if available.`);
         }
-        if (response.status === 401 || response.status === 403) {
-          throw new AppError(502, "GEMINI_AUTH_ERROR", "Google Gemini rejected this API request. Check the key restrictions and ensure the Generative Language API is enabled for the key.");
+        continue;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const responseBody = await response.text();
+    if (!response.ok) {
+      lastStatus = response.status;
+      lastMessage = providerMessage(responseBody, response.status);
+      const modelMissing = response.status === 404 && /model|not found|not supported/i.test(lastMessage);
+      const temporarilyUnavailable = response.status === 503;
+      if (modelMissing || temporarilyUnavailable) {
+        if (config.nodeEnv !== "test") {
+          console.warn(`[TruthSeeker] Gemini model ${model} returned HTTP ${response.status}; trying fallback if available.`);
         }
-        if (response.status === 429) {
-          throw new AppError(503, "UPSTREAM_RATE_LIMIT", "Gemini quota or rate limit reached. Check your Google AI Studio usage and try again later.");
-        }
-        throw new AppError(502, "AI_PROVIDER_ERROR", `Gemini request failed (HTTP ${response.status}). Check the backend terminal for sanitized provider details.`);
+        continue;
       }
 
-      let payload: GeminiGenerateResponse;
-      try {
-        payload = JSON.parse(responseBody) as GeminiGenerateResponse;
-      } catch {
-        throw new AppError(502, "INVALID_MODEL_OUTPUT", "Gemini returned an unreadable response. Please try again.");
+      if (config.nodeEnv !== "test") {
+        console.error("[TruthSeeker] Gemini request failed:", {
+          model,
+          status: response.status,
+          message: sanitize(lastMessage),
+        });
       }
-      successfulText = payload.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("").trim();
-      if (successfulText) break;
-      throw new AppError(502, "INVALID_MODEL_OUTPUT", "Gemini returned an empty response. Please try again.");
+      if (response.status === 401 || response.status === 403) {
+        throw new AppError(502, "GEMINI_AUTH_ERROR", "Google Gemini rejected this API request. Check the key restrictions and ensure the Generative Language API is enabled for the key.");
+      }
+      if (response.status === 429) {
+        throw new AppError(503, "UPSTREAM_RATE_LIMIT", "Gemini quota or rate limit reached. Check your Google AI Studio usage and try again later.");
+      }
+      throw new AppError(502, "AI_PROVIDER_ERROR", `Gemini request failed (HTTP ${response.status}). Check the backend logs for sanitized provider details.`);
     }
-  } finally {
-    clearTimeout(timer);
+
+    let payload: GeminiGenerateResponse;
+    try {
+      payload = JSON.parse(responseBody) as GeminiGenerateResponse;
+    } catch {
+      throw new AppError(502, "INVALID_MODEL_OUTPUT", "Gemini returned an unreadable response. Please try again.");
+    }
+    successfulText = payload.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("").trim();
+    if (successfulText) break;
+    throw new AppError(502, "INVALID_MODEL_OUTPUT", "Gemini returned an empty response. Please try again.");
   }
 
   if (!successfulText) {
     if (config.nodeEnv !== "test") {
-      console.error("[TruthSeeker] No configured Gemini model accepted generateContent:", {
+      console.error("[TruthSeeker] No configured Gemini model succeeded:", {
         modelsTried: models,
         status: lastStatus,
         message: sanitize(lastMessage),
       });
     }
-    throw new AppError(502, "GEMINI_MODEL_ERROR", `Google rejected generateContent for the configured model and fallback models (last HTTP status ${lastStatus || "unknown"}). Check the backend terminal for details.`);
+    if (timedOut && lastStatus === 504) {
+      throw new AppError(504, "UPSTREAM_TIMEOUT", "Gemini models took too long to respond. Please try again shortly.");
+    }
+    if (lastStatus === 503) {
+      throw new AppError(503, "UPSTREAM_UNAVAILABLE", "Gemini is temporarily overloaded across the available models. Please try again shortly.");
+    }
+    throw new AppError(502, "GEMINI_MODEL_ERROR", `Google rejected all configured Gemini models (last HTTP status ${lastStatus || "unknown"}). Check the backend logs for sanitized details.`);
   }
 
   let parsed: unknown;
